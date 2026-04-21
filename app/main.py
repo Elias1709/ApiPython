@@ -1,9 +1,18 @@
+import os
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import OAuth2PasswordRequestForm
 from app.models import Lead
 from app.config import db
 from app.auth import create_access_token, verify_token
+from openai import OpenAI
+from pydantic import BaseModel
 
+client_ai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+class LeadFilter(BaseModel):
+    fuente: str | None = None
+    fecha_inicio: str | None = None
+    fecha_fin: str | None = None
 
 app = FastAPI(
     title="Backend API",
@@ -56,4 +65,47 @@ def delete_lead(email: str, token: dict = Depends(verify_token)):
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     return {"message": "Lead eliminado exitosamente"}
 
+#Endpoints con OpenAI
 
+@app.post("/leads/ai/summary")
+def ai_summary(
+    filtro: LeadFilter,
+    token: dict = Depends(verify_token)
+):
+    # 1. Filtrar leads con datos del body JSON
+    query = {}
+    if filtro.fuente:
+        query["fuente"] = filtro.fuente
+    if filtro.fecha_inicio and filtro.fecha_fin:
+        query["fecha"] = {"$gte": filtro.fecha_inicio, "$lte": filtro.fecha_fin}
+
+    leads = list(db.leads.find(query, {"_id": 0}))
+    if not leads:
+        raise HTTPException(status_code=404, detail="No se encontraron leads con ese filtro")
+
+    # 2. Construir prompt
+    prompt = f"""
+    Analiza estos leads y genera un resumen ejecutivo estructurado:
+    - Número de leads: {len(leads)}
+    - Datos: {leads}
+    
+    Devuelve el resultado en tres secciones claras:
+    1. Análisis general
+    2. Fuente principal
+    3. Recomendaciones estratégicas
+    """
+
+    # 3. Llamada real a OpenAI
+    response = client_ai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Eres un analista de marketing."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=300
+    )
+
+    resumen = response.choices[0].message.content.strip()
+
+    # 4. Retornar resumen
+    return {"summary": resumen}
