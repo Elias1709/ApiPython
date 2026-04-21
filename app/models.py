@@ -1,5 +1,6 @@
 from pydantic import BaseModel, EmailStr
 from typing import Optional
+from datetime import datetime
 
 class Lead(BaseModel):
     nombre: str
@@ -8,3 +9,5 @@ class Lead(BaseModel):
     fuente: str
     producto_interes: Optional[str] = None
     presupuesto: Optional[float] = None
+    created_at: datetime = datetime.now()
+    updated_at: datetime = datetime.now()

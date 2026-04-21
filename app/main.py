@@ -1,11 +1,13 @@
 import os
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel
+from bson import ObjectId
+from datetime import datetime, timedelta
+from openai import OpenAI
 from app.models import Lead
 from app.config import db
 from app.auth import create_access_token, verify_token
-from openai import OpenAI
-from pydantic import BaseModel
 
 client_ai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -26,7 +28,6 @@ def root():
 
 @app.post("/token")
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    # Aquí deberías validar usuario/contraseña contra tu base de datos
     if form_data.username != "admin" or form_data.password != "1234":
         raise HTTPException(status_code=400, detail="Credenciales inválidas")
     access_token = create_access_token(data={"sub": form_data.username})
@@ -40,39 +41,68 @@ def create_lead(lead: Lead, token: dict = Depends(verify_token)):
     return {"id": str(result.inserted_id), "message": "Lead registrado exitosamente"}
 
 @app.get("/leads")
-def get_leads(token: dict = Depends(verify_token)):
-    leads = list(db.leads.find({}, {"_id": 0}))
+def list_leads(page: int = 1, limit: int = 10, fuente: str | None = None,
+               fecha_inicio: str | None = None, fecha_fin: str | None = None,
+               token: dict = Depends(verify_token)):
+    query = {}
+    if fuente:
+        query["fuente"] = fuente
+    if fecha_inicio and fecha_fin:
+        query["created_at"] = {"$gte": fecha_inicio, "$lte": fecha_fin}
+
+    cursor = (
+        db.leads.find(query)
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .sort("created_at", -1)
+    )
+
+    leads = []
+    for lead in cursor:
+        lead["_id"] = str(lead["_id"]) 
+        leads.append(lead)
+
     return {"leads": leads}
 
-@app.get("/leads/{email}")
-def get_lead(email: str, token: dict = Depends(verify_token)):
-    lead = db.leads.find_one({"email": email}, {"_id": 0})
+
+@app.get("/leads/{id}")
+def get_lead(id: str, token: dict = Depends(verify_token)):
+    lead = db.leads.find_one({"_id": ObjectId(id)}, {"_id": 0})
     if not lead:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     return lead
 
-@app.put("/leads/{email}")
-def update_lead(email: str, lead: Lead, token: dict = Depends(verify_token)):
-    result = db.leads.update_one({"email": email}, {"$set": lead.model_dump()})
+@app.patch("/leads/{id}")
+def update_lead(id: str, lead_update: dict, token: dict = Depends(verify_token)):
+    result = db.leads.update_one({"_id": ObjectId(id)}, {"$set": lead_update})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     return {"message": "Lead actualizado exitosamente"}
 
-@app.delete("/leads/{email}")
-def delete_lead(email: str, token: dict = Depends(verify_token)):
-    result = db.leads.delete_one({"email": email})
-    if result.deleted_count == 0:
+@app.delete("/leads/{id}")
+def delete_lead(id: str, token: dict = Depends(verify_token)):
+    result = db.leads.update_one({"_id": ObjectId(id)}, {"$set": {"deleted": True}})
+    if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Lead no encontrado")
-    return {"message": "Lead eliminado exitosamente"}
+    return {"message": "Lead eliminado (soft delete)"}
 
-#Endpoints con OpenAI
+@app.get("/leads/stats")
+def leads_stats(token: dict = Depends(verify_token)):
+    total = db.leads.count_documents({})
+    por_fuente = list(db.leads.aggregate([{"$group": {"_id": "$fuente", "count": {"$sum": 1}}}]))
+    promedio_presupuesto = list(db.leads.aggregate([{"$group": {"_id": None, "avg": {"$avg": "$presupuesto"}}}]))
+    ultimos_7dias = db.leads.count_documents({
+        "fecha": {"$gte": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")}
+    })
+    return {
+        "total": total,
+        "por_fuente": por_fuente,
+        "promedio_presupuesto": promedio_presupuesto,
+        "ultimos_7dias": ultimos_7dias
+    }
 
 @app.post("/leads/ai/summary")
-def ai_summary(
-    filtro: LeadFilter,
-    token: dict = Depends(verify_token)
-):
-    # 1. Filtrar leads con datos del body JSON
+def ai_summary(filtro: LeadFilter, token: dict = Depends(verify_token)):
     query = {}
     if filtro.fuente:
         query["fuente"] = filtro.fuente
@@ -83,7 +113,6 @@ def ai_summary(
     if not leads:
         raise HTTPException(status_code=404, detail="No se encontraron leads con ese filtro")
 
-    # 2. Construir prompt
     prompt = f"""
     Analiza estos leads y genera un resumen ejecutivo estructurado:
     - Número de leads: {len(leads)}
@@ -95,7 +124,6 @@ def ai_summary(
     3. Recomendaciones estratégicas
     """
 
-    # 3. Llamada real a OpenAI
     response = client_ai.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -106,6 +134,4 @@ def ai_summary(
     )
 
     resumen = response.choices[0].message.content.strip()
-
-    # 4. Retornar resumen
     return {"summary": resumen}
