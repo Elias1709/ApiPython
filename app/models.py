@@ -2,7 +2,7 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional
 
 class Lead(BaseModel):
-    name: str
+    nombre: str
     email: EmailStr
     telefono: Optional[str] = None
     fuente: str
