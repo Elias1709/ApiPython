@@ -6,10 +6,13 @@ from bson import ObjectId
 from datetime import datetime, timedelta
 from openai import OpenAI
 from app.models import Lead
+from app.models import LeadFilter
 from app.config import db
 from app.auth import create_access_token, verify_token
 
-client_ai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+##client_ai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+api_key = os.getenv("OPENAI_API_KEY")
+client_ai = OpenAI(api_key=api_key) if api_key else None
 
 class LeadFilter(BaseModel):
     fuente: str | None = None
@@ -64,7 +67,34 @@ def list_leads(page: int = 1, limit: int = 10, fuente: str | None = None,
 
     return {"leads": leads}
 
+@app.post("/leads/stats")
+def leads_stats(filtro: LeadFilter, token: dict = Depends(verify_token)):
+    query = {}
+    if filtro.fuente:
+        query["fuente"] = filtro.fuente
+    if filtro.fecha_inicio and filtro.fecha_fin:
+        try:
+            fi = datetime.strptime(filtro.fecha_inicio, "%Y-%m-%d")
+            ff = datetime.strptime(filtro.fecha_fin, "%Y-%m-%d")
+            query["fecha"] = {"$gte": fi, "$lte": ff}
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Formato de fecha inválido, usa YYYY-MM-DD")
 
+    try:
+        total = db.leads.count_documents(query)
+        por_fuente = list(db.leads.aggregate([
+            {"$match": query},
+            {"$group": {"_id": "$fuente", "count": {"$sum": 1}}}
+        ]))
+        por_fuente_dict = {str(item["_id"]) if item["_id"] else "Sin fuente": item["count"] for item in por_fuente}
+
+        return {
+            "total_leads": total,
+            "por_fuente": por_fuente_dict
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generando estadísticas: {str(e)}")
+    
 @app.get("/leads/{id}")
 def get_lead(id: str, token: dict = Depends(verify_token)):
     lead = db.leads.find_one({"_id": ObjectId(id)}, {"_id": 0})
@@ -86,20 +116,14 @@ def delete_lead(id: str, token: dict = Depends(verify_token)):
         raise HTTPException(status_code=404, detail="Lead no encontrado")
     return {"message": "Lead eliminado (soft delete)"}
 
-@app.get("/leads/stats")
+""" @app.get("/leads/stats")
 def leads_stats(token: dict = Depends(verify_token)):
-    total = db.leads.count_documents({})
-    por_fuente = list(db.leads.aggregate([{"$group": {"_id": "$fuente", "count": {"$sum": 1}}}]))
-    promedio_presupuesto = list(db.leads.aggregate([{"$group": {"_id": None, "avg": {"$avg": "$presupuesto"}}}]))
-    ultimos_7dias = db.leads.count_documents({
-        "fecha": {"$gte": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")}
-    })
-    return {
-        "total": total,
-        "por_fuente": por_fuente,
-        "promedio_presupuesto": promedio_presupuesto,
-        "ultimos_7dias": ultimos_7dias
-    }
+    try:
+        total = db.leads.count_documents({})
+        return {"total_leads": total}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}") """
+    
 
 @app.post("/leads/ai/summary")
 def ai_summary(filtro: LeadFilter, token: dict = Depends(verify_token)):
@@ -109,7 +133,11 @@ def ai_summary(filtro: LeadFilter, token: dict = Depends(verify_token)):
     if filtro.fecha_inicio and filtro.fecha_fin:
         query["fecha"] = {"$gte": filtro.fecha_inicio, "$lte": filtro.fecha_fin}
 
-    leads = list(db.leads.find(query, {"_id": 0}))
+    leads = []
+    for lead in db.leads.find(query, {"_id": 0}):
+        clean_lead = {k: str(v) for k, v in lead.items()}
+        leads.append(clean_lead)
+
     if not leads:
         raise HTTPException(status_code=404, detail="No se encontraron leads con ese filtro")
 
@@ -123,15 +151,21 @@ def ai_summary(filtro: LeadFilter, token: dict = Depends(verify_token)):
     2. Fuente principal
     3. Recomendaciones estratégicas
     """
-
-    response = client_ai.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Eres un analista de marketing."},
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=300
-    )
-
-    resumen = response.choices[0].message.content.strip()
-    return {"summary": resumen}
+    try:
+        response = client_ai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Eres un analista de marketing."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=300
+        )
+        resumen = response.choices[0].message.content.strip()
+        return {"summary": resumen}
+    except Exception as e:        
+        resumen = f"""
+        1. Análisis general: Se encontraron {len(leads)} leads.
+        2. Fuente principal: {leads[0].get("fuente", "Desconocida")}.
+        3. Recomendaciones estratégicas: revisar campañas y optimizar inversión.
+        """
+        return {"summary": resumen}

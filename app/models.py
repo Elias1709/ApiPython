@@ -11,3 +11,8 @@ class Lead(BaseModel):
     presupuesto: Optional[float] = None
     created_at: datetime = datetime.now()
     updated_at: datetime = datetime.now()
+
+class LeadFilter(BaseModel):    
+    fuente: str | None = None
+    fecha_inicio: str | None = None     # formato YYYY-MM-DD
+    fecha_fin: str | None = None        # formato YYYY-MM-DD
