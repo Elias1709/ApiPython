@@ -12,6 +12,7 @@ source venv/bin/activate   # Linux/Mac
 venv\Scripts\activate      # Windows
 pip install -r requirements.txt
 
+Enlace inicial de API: http://127.0.0.1:8000/docs
 
 ## 2. TECNOLOGIAS USADAS
 ## FastAPI — rapidez y documentación automática
